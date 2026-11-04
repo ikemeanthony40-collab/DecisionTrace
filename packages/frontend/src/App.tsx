@@ -463,7 +463,7 @@ setPolicyDetails({
               <div><label htmlFor="funding">Funding amount requested</label><input id="funding" type="number" min="0" step="0.01" value={fundingAmount} onChange={(e) => setFundingAmount(e.target.value)} required /></div>
               <div><label htmlFor="submissionDate">Submission date</label><input id="submissionDate" type="date" value={submissionDate} onChange={(e) => setSubmissionDate(e.target.value)} required /></div>
               <div className="full-width"><label htmlFor="projectDescription">Project description</label><textarea id="projectDescription" rows={3} value={projectDescription} onChange={(e) => setProjectDescription(e.target.value)} required /></div>
-              <div className="full-width"><label htmlFor="impactStatement">Impact statement</label><textarea id="impactStatement" rows={3} value={impactStatement} onChange={(e) => setImpactStatement(e.target.value)} required /></div>
+              <div className="full-width"><label htmlFor="impactStatement">Impact statement</label><textarea id="impactStatement" rows={3} value={impactStatement} onChange={(e) => setImpactStatement(e.target.value)} /></div>
             </div>
             <button className="primary-button" disabled={submitting || !policyDetails}>{submitting ? "Evaluating…" : "Evaluate application"}</button>
           </form>
@@ -475,9 +475,26 @@ setPolicyDetails({
         </section>}
 
         {page === "reviews" && <section className="content-card">
-          <div className="section-heading"><div><h2>Review queue</h2><p>Human review does not change the machine recommendation.</p></div><button className="text-button" onClick={() => void loadWorkspace(token, user)}>Refresh queue</button></div>
+          <div className="section-heading">
+  <div>
+    <button
+      className="text-button"
+      onClick={() => setPage("overview")}
+    >
+      ← Back to Overview
+    </button>
+    <h2>Review queue</h2>
+    <p>Human review does not change the machine recommendation.</p>
+  </div>
+  <button
+    className="text-button"
+    onClick={() => void loadWorkspace(token, user)}
+  >
+    Refresh queue
+  </button>
+</div>
           {user.role !== "reviewer" ? <p className="empty-state">Reviewer access is required to view this queue.</p> : queue.length === 0 ? <p className="empty-state">No cases are waiting for review.</p> : queue.map((item) => <article className="review-card" key={item.id}>
-            <div className="section-heading"><div><h3>{item.caseId}</h3><p>{item.policyTitle} · Submitted {formatDate(item.submittedAt || item.createdAt)}</p></div><span className="badge">{item.recommendation}</span></div>
+            <div className="section-heading"><div><h3>{item.id}</h3><p>{item.policyTitle} · Submitted {formatDate(item.submittedAt || item.createdAt)}</p></div><span className="badge">{item.recommendation}</span></div>
             {item.escalationReasons?.length > 0 && <div><strong>Escalation reasons</strong><ul>{item.escalationReasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul></div>}
             <details><summary>Applicant data</summary><pre>{JSON.stringify(item.applicantData, null, 2)}</pre></details>
             <label htmlFor={`notes-${item.id}`}>Reviewer notes</label><textarea id={`notes-${item.id}`} rows={2} value={reviewNotes[item.id] || ""} onChange={(e) => setReviewNotes((old) => ({ ...old, [item.id]: e.target.value }))} />
@@ -505,6 +522,12 @@ setPolicyDetails({
           <section className="content-card">
             <div className="section-heading">
               <div>
+                <button
+                  className="text-button"
+                  onClick={() => setPage("overview")}
+                >
+                  ← Back to Overview
+                </button>
                 <h2>Decision history</h2>
                 <p>Review machine recommendations and recorded reviewer actions.</p>
               </div>
@@ -524,7 +547,7 @@ setPolicyDetails({
                   <article className="review-card" key={item.id}>
                     <div className="section-heading">
                       <div>
-                        <h3>{item.caseId}</h3>
+                        <h3>{item.id}</h3>
                         <p>Decision recorded: {formatDate(item.decisionCreatedAt)}</p>
                       </div>
                       <span className="badge">{item.recommendation}</span>

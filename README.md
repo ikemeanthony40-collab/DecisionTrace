@@ -88,8 +88,8 @@ The project uses pnpm workspaces to manage its frontend and backend packages.
 Clone the repository:
 
 ```powershell
-git clone YOUR_PUBLIC_REPOSITORY_URL
-cd Kiroween2026
+git clone https://github.com/ikemeanthony40-collab/DecisionTrace.git
+cd DecisionTrace
 ```
 
 Install dependencies:
@@ -226,7 +226,13 @@ The project is being prepared for public release and demonstration.
 
 ## License
 
-License information will be added when the project is released under its selected open-source license.
+License
+
+DecisionTrace is released under the MIT License.
+
+Copyright (c) 2026 ANTHONY MBADIWE IKEME
+
+See the [LICENSE](LICENSE) file for details.
 
 ## Demo
 

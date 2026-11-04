@@ -1,0 +1,16 @@
+{
+  "name": "decisiontrace",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A deterministic, auditable policy decision system",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @decisiontrace/backend --filter @decisiontrace/frontend dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "build": "tsc",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "db:init": "tsx src/db/database.ts",
-    "seed": "tsx src/db/seed.ts"
-  },
+  "dev": "tsx watch src/server.ts",
+  "build": "tsc",
+  "start": "node dist/server.js",
+  "test": "vitest run",
+  "typecheck": "tsc --noEmit",
+  "db:init": "tsx src/db/database.ts",
+  "seed": "tsx src/db/seed.ts"
+},
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^13.0.3",

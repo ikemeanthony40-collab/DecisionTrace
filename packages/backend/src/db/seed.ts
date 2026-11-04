@@ -22,14 +22,6 @@ const seed = db.transaction(() => {
     throw new Error("Both account passwords must be at least 12 characters.");
   }
 
-  const existingPolicy = db
-    .prepare("SELECT id FROM policies WHERE policy_key = ?")
-    .get("greenleaf-fund") as { id: string } | undefined;
-
-  if (existingPolicy) {
-    console.log("Greenleaf sample policy already exists. No changes made.");
-    return;
-  }
 
   const adminId = randomUUID();
   const reviewerId = randomUUID();
@@ -65,6 +57,14 @@ const seed = db.transaction(() => {
   const savedAdmin = db
     .prepare("SELECT id FROM users WHERE username = ?")
     .get(adminUsername) as { id: string };
+  const existingPolicy = db
+    .prepare("SELECT id FROM policies WHERE policy_key = ?")
+    .get("greenleaf-fund") as { id: string } | undefined;
+
+  if (existingPolicy) {
+    console.log("Required accounts checked. Greenleaf sample policy already exists. No policy changes made.");
+    return;
+  }
 
   const policyId = randomUUID();
 

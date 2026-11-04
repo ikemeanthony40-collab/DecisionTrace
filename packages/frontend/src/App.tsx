@@ -1,7 +1,7 @@
 ﻿import { useEffect, useState, type FormEvent } from "react";
 import "./style.css";
 
-const API_URL = "http://localhost:3001/api";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001/api";
 
 type Role = "administrator" | "reviewer";
 type Recommendation = "APPROVED" | "DENIED" | "ESCALATED";

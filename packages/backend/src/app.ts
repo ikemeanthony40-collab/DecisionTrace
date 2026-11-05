@@ -9,7 +9,6 @@ import {
 } from "./auth/auth.service.js";
 import {
   requireAuthentication,
-  requireRole,
 } from "./auth/auth.middleware.js";
 import { policyRouter } from "./policies/policy.routes.js";
 import { decisionRouter } from "./decisions/decision.routes.js";
@@ -99,18 +98,6 @@ app.get("/api/auth/me", requireAuthentication, (req, res) => {
     user: req.user,
   });
 });
-
-// Temporary endpoint for testing role enforcement.
-app.get(
-  "/api/auth/admin-test",
-  requireAuthentication,
-  requireRole("administrator"),
-  (_req, res) => {
-    res.json({
-      message: "Administrator access granted.",
-    });
-  }
-);
 
 // Return a consistent error for unexpected server failures.
 app.use(

@@ -1,9 +1,16 @@
 
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
 import request from "supertest";
 import jwt from "jsonwebtoken";
 import { app } from "../src/app.js";
-import { db } from "../src/db/database.js";
+import { pool } from "../src/db/postgres.js";
 
 const JWT_SECRET =
   "decisiontrace-test-secret-only-32-characters-minimum";
@@ -43,102 +50,123 @@ const adminToken = createToken(
   "administrator"
 );
 
-function seedDatabase() {
-  db.exec(`
-    DELETE FROM audit_events;
-    DELETE FROM review_actions;
-    DELETE FROM rule_results;
-    DELETE FROM decision_rule_snapshots;
-    DELETE FROM decisions;
-    DELETE FROM cases;
-    DELETE FROM policy_rules;
-    DELETE FROM policies;
-    DELETE FROM users;
+async function seedDatabase() {
+  await pool.query(`
+    TRUNCATE TABLE
+      audit_events,
+      review_actions,
+      rule_results,
+      decision_rule_snapshots,
+      decisions,
+      cases,
+      policy_rules,
+      policies,
+      users
+    CASCADE
   `);
 
-  db.prepare(`
-    INSERT INTO users (id, username, password_hash, role)
-    VALUES (?, ?, ?, ?)
-  `).run(REVIEWER_ID, "test-reviewer", "test-hash", "reviewer");
+  await pool.query(
+    `INSERT INTO users (id, username, password_hash, role)
+     VALUES ($1, $2, $3, $4)`,
+    [REVIEWER_ID, "test-reviewer", "test-hash", "reviewer"]
+  );
 
-  db.prepare(`
-    INSERT INTO users (id, username, password_hash, role)
-    VALUES (?, ?, ?, ?)
-  `).run(ADMIN_ID, "test-admin", "test-hash", "administrator");
+  await pool.query(
+    `INSERT INTO users (id, username, password_hash, role)
+     VALUES ($1, $2, $3, $4)`,
+    [ADMIN_ID, "test-admin", "test-hash", "administrator"]
+  );
 
-  db.prepare(`
-    INSERT INTO policies (
+  await pool.query(
+    `INSERT INTO policies (
       id, policy_key, version, title, policy_text, status, created_by
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    POLICY_ID,
-    "review-test-policy",
-    1,
-    "Review Test Policy",
-    "Test policy text.",
-    "active",
-    ADMIN_ID
+    VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      POLICY_ID,
+      "review-test-policy",
+      1,
+      "Review Test Policy",
+      "Test policy text.",
+      "active",
+      ADMIN_ID,
+    ]
   );
 
-  db.prepare(`
-    INSERT INTO cases (
+  await pool.query(
+    `INSERT INTO cases (
       id, policy_version_id, applicant_data_json, submitted_by
     )
-    VALUES (?, ?, ?, ?)
-  `).run(
-    CASE_ID,
-    POLICY_ID,
-    JSON.stringify({ applicant_name: "Test Applicant" }),
-    ADMIN_ID
+    VALUES ($1, $2, $3, $4)`,
+    [
+      CASE_ID,
+      POLICY_ID,
+      JSON.stringify({ applicant_name: "Test Applicant" }),
+      ADMIN_ID,
+    ]
   );
 
-  db.prepare(`
-    INSERT INTO decisions (
+  await pool.query(
+    `INSERT INTO decisions (
       id, case_id, policy_version_id, recommendation
     )
-    VALUES (?, ?, ?, ?)
-  `).run(
-    ESCALATED_DECISION_ID,
-    CASE_ID,
-    POLICY_ID,
-    "ESCALATED"
+    VALUES ($1, $2, $3, $4)`,
+    [
+      ESCALATED_DECISION_ID,
+      CASE_ID,
+      POLICY_ID,
+      "ESCALATED",
+    ]
   );
 
   const approvedCaseId = "case-approved-1";
 
-  db.prepare(`
-    INSERT INTO cases (
+  await pool.query(
+    `INSERT INTO cases (
       id, policy_version_id, applicant_data_json, submitted_by
     )
-    VALUES (?, ?, ?, ?)
-  `).run(
-    approvedCaseId,
-    POLICY_ID,
-    JSON.stringify({ applicant_name: "Another Applicant" }),
-    ADMIN_ID
+    VALUES ($1, $2, $3, $4)`,
+    [
+      approvedCaseId,
+      POLICY_ID,
+      JSON.stringify({ applicant_name: "Another Applicant" }),
+      ADMIN_ID,
+    ]
   );
 
-  db.prepare(`
-    INSERT INTO decisions (
+  await pool.query(
+    `INSERT INTO decisions (
       id, case_id, policy_version_id, recommendation
     )
-    VALUES (?, ?, ?, ?)
-  `).run(
-    APPROVED_DECISION_ID,
-    approvedCaseId,
-    POLICY_ID,
-    "APPROVED"
+    VALUES ($1, $2, $3, $4)`,
+    [
+      APPROVED_DECISION_ID,
+      approvedCaseId,
+      POLICY_ID,
+      "APPROVED",
+    ]
   );
 }
 
 describe("Reviewer API", () => {
-  beforeEach(() => {
-    seedDatabase();
+  beforeAll(async () => {
+    const result = await pool.query(
+      "SELECT current_database() AS database_name"
+    );
+
+    if (result.rows[0]?.database_name !== "decisiontrace_test") {
+      throw new Error(
+        "Safety check failed: tests may only run against decisiontrace_test."
+      );
+    }
   });
 
-  afterAll(() => {
-    db.close();
+  beforeEach(async () => {
+    await seedDatabase();
+  });
+
+  afterAll(async () => {
+    await pool.end();
   });
 
   it("rejects unauthenticated review requests", async () => {
@@ -176,13 +204,12 @@ describe("Reviewer API", () => {
     expect(response.body.review.reviewerId).toBe(REVIEWER_ID);
     expect(response.body.machineRecommendation).toBe("ESCALATED");
 
-    const savedDecision = db
-      .prepare("SELECT recommendation FROM decisions WHERE id = ?")
-      .get(ESCALATED_DECISION_ID) as {
-        recommendation: string;
-      };
+    const savedDecision = await pool.query(
+      "SELECT recommendation FROM decisions WHERE id = $1",
+      [ESCALATED_DECISION_ID]
+    );
 
-    expect(savedDecision.recommendation).toBe("ESCALATED");
+    expect(savedDecision.rows[0]?.recommendation).toBe("ESCALATED");
   });
 
   it("rejects a review reason shorter than 10 characters", async () => {
@@ -249,22 +276,18 @@ describe("Reviewer API", () => {
 
     expect(response.status).toBe(201);
 
-    const auditEvent = db
-      .prepare(`
-        SELECT event_type, actor_id, details_json
-        FROM audit_events
-        WHERE event_type = 'review-action-taken'
-      `)
-      .get() as {
-        event_type: string;
-        actor_id: string;
-        details_json: string;
-      };
+    const auditEvent = await pool.query(
+      `SELECT event_type, actor_id, details_json
+       FROM audit_events
+       WHERE event_type = 'review-action-taken'`
+    );
 
-    expect(auditEvent.event_type).toBe("review-action-taken");
-    expect(auditEvent.actor_id).toBe(REVIEWER_ID);
+    expect(auditEvent.rows.length).toBe(1);
+    expect(auditEvent.rows[0].event_type).toBe("review-action-taken");
+    expect(auditEvent.rows[0].actor_id).toBe(REVIEWER_ID);
 
-    const details = JSON.parse(auditEvent.details_json);
+    const details = JSON.parse(auditEvent.rows[0].details_json);
+
     expect(details.decisionId).toBe(ESCALATED_DECISION_ID);
     expect(details.action).toBe("OVERRIDE");
     expect(details.reason).toBe(

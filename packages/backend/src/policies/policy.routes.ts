@@ -1,5 +1,7 @@
+
 import { Router } from "express";
-import { db } from "../db/database.js";
+import { randomUUID } from "node:crypto";
+import { pool } from "../db/postgres.js";
 import {
   requireAuthentication,
   requireRole,
@@ -38,17 +40,15 @@ export const policyRouter = Router();
 policyRouter.get(
   "/",
   requireAuthentication,
-  (_req, res, next) => {
+  async (_req, res, next) => {
     try {
-      const policies = db
-        .prepare(
-          `SELECT id, policy_key, version, title, status, created_at
-           FROM policies
-           ORDER BY policy_key, version DESC`
-        )
-        .all();
+      const result = await pool.query(
+        `SELECT id, policy_key, version, title, status, created_at
+         FROM policies
+         ORDER BY policy_key, version DESC`
+      );
 
-      res.json({ policies });
+      res.json({ policies: result.rows });
     } catch (error) {
       next(error);
     }
@@ -59,33 +59,35 @@ policyRouter.get(
 policyRouter.get(
   "/:policyId",
   requireAuthentication,
-  (req, res, next) => {
+  async (req, res, next) => {
     try {
-      const policy = db
-        .prepare(
-          `SELECT id, policy_key, version, title, policy_text,
-                  status, created_at
-           FROM policies
-           WHERE id = ?`
-        )
-        .get(req.params.policyId) as PolicyRecord | undefined;
+      const policyResult = await pool.query<PolicyRecord>(
+        `SELECT id, policy_key, version, title, policy_text,
+                status, created_at
+         FROM policies
+         WHERE id = $1`,
+        [req.params.policyId]
+      );
+
+      const policy = policyResult.rows[0];
 
       if (!policy) {
         res.status(404).json({ error: "Policy not found." });
         return;
       }
 
-      const rules = db
-        .prepare(
-          `SELECT id, logical_rule_id, version, policy_version_id,
-                  name, rule_type, target_field, operator, threshold_json,
-                  evidence_passage, status, predecessor_id,
-                  created_at, updated_at
-           FROM policy_rules
-           WHERE policy_version_id = ?
-           ORDER BY logical_rule_id, version`
-        )
-        .all(policy.id) as RuleRecord[];
+      const rulesResult = await pool.query<RuleRecord>(
+        `SELECT id, logical_rule_id, version, policy_version_id,
+                name, rule_type, target_field, operator, threshold_json,
+                evidence_passage, status, predecessor_id,
+                created_at, updated_at
+         FROM policy_rules
+         WHERE policy_version_id = $1
+         ORDER BY logical_rule_id, version`,
+        [policy.id]
+      );
+
+      const rules = rulesResult.rows;
 
       res.json({
         policy,
@@ -109,17 +111,20 @@ policyRouter.post(
   "/:policyId/rules/:ruleId/validate",
   requireAuthentication,
   requireRole("administrator"),
-  (req, res, next) => {
+  async (req, res, next) => {
     try {
-      const policy = db
-        .prepare(
-          `SELECT id, policy_text, status
-           FROM policies
-           WHERE id = ?`
-        )
-        .get(req.params.policyId) as
-        | { id: string; policy_text: string; status: string }
-        | undefined;
+      const policyResult = await pool.query<{
+        id: string;
+        policy_text: string;
+        status: string;
+      }>(
+        `SELECT id, policy_text, status
+         FROM policies
+         WHERE id = $1`,
+        [req.params.policyId]
+      );
+
+      const policy = policyResult.rows[0];
 
       if (!policy) {
         res.status(404).json({ error: "Policy not found." });
@@ -133,20 +138,19 @@ policyRouter.post(
         return;
       }
 
-      const rule = db
-        .prepare(
-          `SELECT id, policy_version_id, evidence_passage, status
-           FROM policy_rules
-           WHERE id = ? AND policy_version_id = ?`
-        )
-        .get(req.params.ruleId, policy.id) as
-        | {
-            id: string;
-            policy_version_id: string;
-            evidence_passage: string;
-            status: string;
-          }
-        | undefined;
+      const ruleResult = await pool.query<{
+        id: string;
+        policy_version_id: string;
+        evidence_passage: string;
+        status: string;
+      }>(
+        `SELECT id, policy_version_id, evidence_passage, status
+         FROM policy_rules
+         WHERE id = $1 AND policy_version_id = $2`,
+        [req.params.ruleId, policy.id]
+      );
+
+      const rule = ruleResult.rows[0];
 
       if (!rule) {
         res.status(404).json({ error: "Rule not found for this policy." });
@@ -171,32 +175,46 @@ policyRouter.post(
       }
 
       const now = new Date().toISOString();
+      const client = await pool.connect();
 
-      const updateRule = db.transaction(() => {
-        db.prepare(
+      try {
+        await client.query("BEGIN");
+
+        const updateResult = await client.query(
           `UPDATE policy_rules
-           SET status = 'validated', updated_at = ?
-           WHERE id = ? AND status = 'extracted'`
-        ).run(now, rule.id);
+           SET status = 'validated', updated_at = $1
+           WHERE id = $2 AND status = 'extracted'`,
+          [now, rule.id]
+        );
 
-        db.prepare(
+        if (updateResult.rowCount !== 1) {
+          throw new Error("RULE_VALIDATION_CONFLICT");
+        }
+
+        await client.query(
           `INSERT INTO audit_events
            (id, event_type, actor_id, summary, details_json, created_at)
-           VALUES (?, 'rule-validated', ?, ?, ?, ?)`
-        ).run(
-          crypto.randomUUID(),
-          req.user!.id,
-          `Rule ${rule.id} validated`,
-          JSON.stringify({
-            policyId: policy.id,
-            ruleId: rule.id,
-            evidencePassage: rule.evidence_passage,
-          }),
-          now
+           VALUES ($1, 'rule-validated', $2, $3, $4, $5)`,
+          [
+            randomUUID(),
+            req.user!.id,
+            `Rule ${rule.id} validated`,
+            JSON.stringify({
+              policyId: policy.id,
+              ruleId: rule.id,
+              evidencePassage: rule.evidence_passage,
+            }),
+            now,
+          ]
         );
-      });
 
-      updateRule();
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
 
       res.json({
         message: "Rule validated successfully.",
@@ -204,6 +222,16 @@ policyRouter.post(
         status: "validated",
       });
     } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "RULE_VALIDATION_CONFLICT"
+      ) {
+        res.status(409).json({
+          error: "Only extracted rules can be validated.",
+        });
+        return;
+      }
+
       next(error);
     }
   }

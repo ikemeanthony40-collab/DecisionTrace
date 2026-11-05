@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { randomUUID } from "node:crypto";
-import { db } from "../db/database.js";
+import { pool } from "../db/postgres.js";
 
 export type UserRole = "administrator" | "reviewer";
 
@@ -42,13 +42,14 @@ export async function authenticateUser(
   username: string,
   password: string
 ): Promise<{ token: string; user: AuthenticatedUser } | null> {
-  const record = db
-    .prepare(
-      `SELECT id, username, password_hash, role
-       FROM users
-       WHERE username = ?`
-    )
-    .get(username) as UserRecord | undefined;
+  const result = await pool.query<UserRecord>(
+    `SELECT id, username, password_hash, role
+     FROM users
+     WHERE username = $1`,
+    [username]
+  );
+
+  const record = result.rows[0];
 
   if (!record) {
     return null;

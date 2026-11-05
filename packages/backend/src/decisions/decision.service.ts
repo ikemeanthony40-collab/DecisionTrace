@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+
 
 export type DecisionRecommendation = "APPROVED" | "DENIED" | "ESCALATED";
 export type RuleResultStatus = "PASS" | "FAIL" | "MISSING_INFO";

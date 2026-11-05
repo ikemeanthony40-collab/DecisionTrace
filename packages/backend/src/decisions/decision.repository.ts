@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { db } from "../db/database.js";
+import { pool } from "../db/postgres.js";
 import {
   evaluateDecision,
   type EvaluationRule,
@@ -35,14 +35,17 @@ export interface SavedDecision {
   }>;
 }
 
-export function submitCase(input: SubmitCaseInput): SavedDecision {
-  const policy = db
-    .prepare(
-      `SELECT id, status
-       FROM policies
-       WHERE id = ?`
-    )
-    .get(input.policyId) as PolicyRow | undefined;
+export async function submitCase(
+  input: SubmitCaseInput
+): Promise<SavedDecision> {
+  const policyResult = await pool.query<PolicyRow>(
+    `SELECT id, status
+     FROM policies
+     WHERE id = $1`,
+    [input.policyId]
+  );
+
+  const policy = policyResult.rows[0];
 
   if (!policy) {
     throw new Error("POLICY_NOT_FOUND");
@@ -52,17 +55,18 @@ export function submitCase(input: SubmitCaseInput): SavedDecision {
     throw new Error("POLICY_NOT_ACTIVE");
   }
 
-  const rules = db
-    .prepare(
-      `SELECT id, logical_rule_id, version, name, rule_type,
-              target_field, operator, threshold_json,
-              evidence_passage, status, policy_version_id
-       FROM policy_rules
-       WHERE policy_version_id = ?
-         AND status != 'retired'
-       ORDER BY logical_rule_id, version`
-    )
-    .all(policy.id) as RuleRow[];
+  const rulesResult = await pool.query<RuleRow>(
+    `SELECT id, logical_rule_id, version, name, rule_type,
+            target_field, operator, threshold_json,
+            evidence_passage, status, policy_version_id
+     FROM policy_rules
+     WHERE policy_version_id = $1
+       AND status != 'retired'
+     ORDER BY logical_rule_id, version`,
+    [policy.id]
+  );
+
+  const rules = rulesResult.rows;
 
   const evaluation = evaluateDecision(rules, input.applicantData);
 
@@ -70,46 +74,37 @@ export function submitCase(input: SubmitCaseInput): SavedDecision {
   const caseId = randomUUID();
   const decisionId = randomUUID();
 
-  const saveTransaction = db.transaction(() => {
-    db.prepare(
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    await client.query(
       `INSERT INTO cases
        (id, policy_version_id, applicant_data_json, submitted_by, submitted_at)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(
-      caseId,
-      policy.id,
-      JSON.stringify(input.applicantData),
-      input.submittedBy,
-      now
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        caseId,
+        policy.id,
+        JSON.stringify(input.applicantData),
+        input.submittedBy,
+        now,
+      ]
     );
 
-    db.prepare(
+    await client.query(
       `INSERT INTO decisions
        (id, case_id, policy_version_id, recommendation,
         escalation_reasons_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(
-      decisionId,
-      caseId,
-      policy.id,
-      evaluation.recommendation,
-      JSON.stringify(evaluation.escalationReasons),
-      now
-    );
-
-    const insertSnapshot = db.prepare(
-      `INSERT INTO decision_rule_snapshots
-       (id, decision_id, source_rule_id, logical_rule_id,
-        rule_version, rule_name, rule_type, target_field,
-        operator, threshold_json, evidence_passage, rule_status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-
-    const insertResult = db.prepare(
-      `INSERT INTO rule_results
-       (id, decision_id, snapshot_id, result,
-        observed_value_json, explanation)
-       VALUES (?, ?, ?, ?, ?, ?)`
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        decisionId,
+        caseId,
+        policy.id,
+        evaluation.recommendation,
+        JSON.stringify(evaluation.escalationReasons),
+        now,
+      ]
     );
 
     const resultsByRuleId = new Map(
@@ -119,54 +114,73 @@ export function submitCase(input: SubmitCaseInput): SavedDecision {
     for (const rule of rules) {
       const snapshotId = randomUUID();
 
-      insertSnapshot.run(
-        snapshotId,
-        decisionId,
-        rule.id,
-        rule.logical_rule_id,
-        rule.version,
-        rule.name,
-        rule.rule_type,
-        rule.target_field,
-        rule.operator,
-        rule.threshold_json,
-        rule.evidence_passage,
-        rule.status
+      await client.query(
+        `INSERT INTO decision_rule_snapshots
+         (id, decision_id, source_rule_id, logical_rule_id,
+          rule_version, rule_name, rule_type, target_field,
+          operator, threshold_json, evidence_passage, rule_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          snapshotId,
+          decisionId,
+          rule.id,
+          rule.logical_rule_id,
+          rule.version,
+          rule.name,
+          rule.rule_type,
+          rule.target_field,
+          rule.operator,
+          rule.threshold_json,
+          rule.evidence_passage,
+          rule.status,
+        ]
       );
 
       const result = resultsByRuleId.get(rule.id);
 
       if (result) {
-        insertResult.run(
-          randomUUID(),
-          decisionId,
-          snapshotId,
-          result.status,
-          JSON.stringify(result.observedValue ?? null),
-          result.explanation
+        await client.query(
+          `INSERT INTO rule_results
+           (id, decision_id, snapshot_id, result,
+            observed_value_json, explanation)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            randomUUID(),
+            decisionId,
+            snapshotId,
+            result.status,
+            JSON.stringify(result.observedValue ?? null),
+            result.explanation,
+          ]
         );
       }
     }
 
-    db.prepare(
+    await client.query(
       `INSERT INTO audit_events
        (id, event_type, actor_id, summary, details_json, created_at)
-       VALUES (?, 'case-submitted', ?, ?, ?, ?)`
-    ).run(
-      randomUUID(),
-      input.submittedBy,
-      `Case ${caseId} evaluated as ${evaluation.recommendation}`,
-      JSON.stringify({
-        caseId,
-        decisionId,
-        policyVersionId: policy.id,
-        recommendation: evaluation.recommendation,
-      }),
-      now
+       VALUES ($1, 'case-submitted', $2, $3, $4, $5)`,
+      [
+        randomUUID(),
+        input.submittedBy,
+        `Case ${caseId} evaluated as ${evaluation.recommendation}`,
+        JSON.stringify({
+          caseId,
+          decisionId,
+          policyVersionId: policy.id,
+          recommendation: evaluation.recommendation,
+        }),
+        now,
+      ]
     );
-  });
 
-  saveTransaction();
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 
   return {
     id: decisionId,

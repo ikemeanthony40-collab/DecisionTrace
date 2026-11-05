@@ -27,3 +27,4 @@ Thumbs.db
 App.backup.txt
 # TypeScript build cache
 *.tsbuildinfo
+/database-backup-*/

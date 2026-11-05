@@ -1,7 +1,8 @@
+
 import { Router } from "express";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { db } from "../db/database.js";
+import { pool } from "../db/postgres.js";
 import {
   requireAuthentication,
   requireRole,
@@ -20,8 +21,9 @@ const reviewSchema = z.object({
   reason: z.string().trim().min(10, "Reason must contain at least 10 characters."),
 });
 
-interface SqliteError extends Error {
+interface PostgresError extends Error {
   code?: string;
+  constraint?: string;
 }
 
 function isDuplicateReviewError(error: unknown): boolean {
@@ -29,12 +31,11 @@ function isDuplicateReviewError(error: unknown): boolean {
     return false;
   }
 
-  const code = (error as SqliteError).code;
-  const message = error instanceof Error ? error.message : "";
+  const pgError = error as PostgresError;
 
   return (
-    code === "SQLITE_CONSTRAINT_UNIQUE" &&
-    message.includes("review_actions.decision_id")
+    pgError.code === "23505" &&
+    pgError.constraint === "review_actions_decision_id_key"
   );
 }
 
@@ -42,7 +43,7 @@ function isDuplicateReviewError(error: unknown): boolean {
 decisionRouter.post(
   "/",
   requireAuthentication,
-  (req, res, next) => {
+  async (req, res, next) => {
     try {
       const parsed = submitSchema.safeParse(req.body);
 
@@ -57,7 +58,7 @@ decisionRouter.post(
         return;
       }
 
-      const result = submitCase({
+      const result = await submitCase({
         policyId: parsed.data.policyId,
         applicantData: parsed.data.applicantData,
         submittedBy: req.user!.id,
@@ -88,39 +89,29 @@ decisionRouter.get(
   "/review-queue",
   requireAuthentication,
   requireRole("reviewer"),
-  (_req, res, next) => {
+  async (_req, res, next) => {
     try {
-      const rows = db
-        .prepare(
-          `SELECT
-             d.id AS decision_id,
-             d.case_id,
-             d.policy_version_id,
-             d.recommendation,
-             d.escalation_reasons_json,
-             d.created_at AS decision_created_at,
-             c.applicant_data_json,
-             c.submitted_at,
-             p.title AS policy_title
-           FROM decisions d
-           JOIN cases c ON c.id = d.case_id
-           JOIN policies p ON p.id = d.policy_version_id
-           LEFT JOIN review_actions ra ON ra.decision_id = d.id
-           WHERE d.recommendation = 'ESCALATED'
-             AND ra.id IS NULL
-           ORDER BY d.created_at ASC, d.id ASC`
-        )
-        .all() as Array<{
-          decision_id: string;
-          case_id: string;
-          policy_version_id: string;
-          recommendation: string;
-          escalation_reasons_json: string;
-          decision_created_at: string;
-          applicant_data_json: string;
-          submitted_at: string;
-          policy_title: string;
-        }>;
+      const result = await pool.query(
+        `SELECT
+           d.id AS decision_id,
+           d.case_id,
+           d.policy_version_id,
+           d.recommendation,
+           d.escalation_reasons_json,
+           d.created_at AS decision_created_at,
+           c.applicant_data_json,
+           c.submitted_at,
+           p.title AS policy_title
+         FROM decisions d
+         JOIN cases c ON c.id = d.case_id
+         JOIN policies p ON p.id = d.policy_version_id
+         LEFT JOIN review_actions ra ON ra.decision_id = d.id
+         WHERE d.recommendation = 'ESCALATED'
+           AND ra.id IS NULL
+         ORDER BY d.created_at ASC, d.id ASC`
+      );
+
+      const rows = result.rows;
 
       res.json({
         decisions: rows.map((row) => ({
@@ -147,34 +138,25 @@ decisionRouter.get(
   "/history",
   requireAuthentication,
   requireRole("administrator"),
-  (_req, res, next) => {
+  async (_req, res, next) => {
     try {
-      const rows = db
-        .prepare(
-          `SELECT
-             d.id AS decision_id,
-             d.case_id,
-             d.recommendation,
-             d.created_at AS decision_created_at,
-             ra.action AS review_action,
-             ra.reason AS review_reason,
-             ra.created_at AS review_created_at,
-             u.username AS reviewer_username
-           FROM decisions d
-           LEFT JOIN review_actions ra ON ra.decision_id = d.id
-           LEFT JOIN users u ON u.id = ra.reviewer_id
-           ORDER BY d.created_at DESC, d.id DESC`
-        )
-        .all() as Array<{
-          decision_id: string;
-          case_id: string;
-          recommendation: string;
-          decision_created_at: string;
-          review_action: string | null;
-          review_reason: string | null;
-          review_created_at: string | null;
-          reviewer_username: string | null;
-        }>;
+      const result = await pool.query(
+        `SELECT
+           d.id AS decision_id,
+           d.case_id,
+           d.recommendation,
+           d.created_at AS decision_created_at,
+           ra.action AS review_action,
+           ra.reason AS review_reason,
+           ra.created_at AS review_created_at,
+           u.username AS reviewer_username
+         FROM decisions d
+         LEFT JOIN review_actions ra ON ra.decision_id = d.id
+         LEFT JOIN users u ON u.id = ra.reviewer_id
+         ORDER BY d.created_at DESC, d.id DESC`
+      );
+
+      const rows = result.rows;
 
       res.json({
         decisions: rows.map((row) => ({
@@ -206,7 +188,7 @@ decisionRouter.post(
   "/:decisionId/review",
   requireAuthentication,
   requireRole("reviewer"),
-  (req, res, next) => {
+  async (req, res, next) => {
     try {
       const parsed = reviewSchema.safeParse(req.body);
 
@@ -221,13 +203,14 @@ decisionRouter.post(
         return;
       }
 
-      const decision = db
-        .prepare(
-          `SELECT id, recommendation
-           FROM decisions
-           WHERE id = ?`
-        )
-        .get(req.params.decisionId) as
+      const decisionResult = await pool.query(
+        `SELECT id, recommendation
+         FROM decisions
+         WHERE id = $1`,
+        [req.params.decisionId]
+      );
+
+      const decision = decisionResult.rows[0] as
         | { id: string; recommendation: string }
         | undefined;
 
@@ -246,40 +229,50 @@ decisionRouter.post(
       const actionId = randomUUID();
       const now = new Date().toISOString();
       const reason = parsed.data.reason;
+      const client = await pool.connect();
 
-      const saveReview = db.transaction(() => {
-        db.prepare(
+      try {
+        await client.query("BEGIN");
+
+        await client.query(
           `INSERT INTO review_actions
              (id, decision_id, action, reason, reviewer_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`
-        ).run(
-          actionId,
-          decision.id,
-          parsed.data.action,
-          reason,
-          req.user!.id,
-          now
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            actionId,
+            decision.id,
+            parsed.data.action,
+            reason,
+            req.user!.id,
+            now,
+          ]
         );
 
-        db.prepare(
+        await client.query(
           `INSERT INTO audit_events
              (id, event_type, actor_id, summary, details_json, created_at)
-           VALUES (?, 'review-action-taken', ?, ?, ?, ?)`
-        ).run(
-          randomUUID(),
-          req.user!.id,
-          `Reviewer recorded ${parsed.data.action} for decision ${decision.id}`,
-          JSON.stringify({
-            decisionId: decision.id,
-            actionId,
-            action: parsed.data.action,
-            reason,
-          }),
-          now
+           VALUES ($1, 'review-action-taken', $2, $3, $4, $5)`,
+          [
+            randomUUID(),
+            req.user!.id,
+            `Reviewer recorded ${parsed.data.action} for decision ${decision.id}`,
+            JSON.stringify({
+              decisionId: decision.id,
+              actionId,
+              action: parsed.data.action,
+              reason,
+            }),
+            now,
+          ]
         );
-      });
 
-      saveReview();
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
 
       res.status(201).json({
         review: {
@@ -313,18 +306,19 @@ decisionRouter.post(
 decisionRouter.get(
   "/:decisionId",
   requireAuthentication,
-  (req, res, next) => {
+  async (req, res, next) => {
     try {
-      const decision = db
-        .prepare(
-          `SELECT d.id, d.case_id, d.policy_version_id,
-                  d.recommendation, d.escalation_reasons_json,
-                  d.created_at, c.applicant_data_json, c.submitted_at
-           FROM decisions d
-           JOIN cases c ON c.id = d.case_id
-           WHERE d.id = ?`
-        )
-        .get(req.params.decisionId) as
+      const decisionResult = await pool.query(
+        `SELECT d.id, d.case_id, d.policy_version_id,
+                d.recommendation, d.escalation_reasons_json,
+                d.created_at, c.applicant_data_json, c.submitted_at
+         FROM decisions d
+         JOIN cases c ON c.id = d.case_id
+         WHERE d.id = $1`,
+        [req.params.decisionId]
+      );
+
+      const decision = decisionResult.rows[0] as
         | {
             id: string;
             case_id: string;
@@ -342,46 +336,47 @@ decisionRouter.get(
         return;
       }
 
-      const snapshots = db
-        .prepare(
-          `SELECT id, source_rule_id, logical_rule_id, rule_version,
-                  rule_name, rule_type, target_field, operator,
-                  threshold_json, evidence_passage, rule_status
-           FROM decision_rule_snapshots
-           WHERE decision_id = ?
-           ORDER BY rule_name`
-        )
-        .all(decision.id) as Array<{
-          id: string;
-          source_rule_id: string;
-          logical_rule_id: string;
-          rule_version: number;
-          rule_name: string;
-          rule_type: string;
-          target_field: string;
-          operator: string;
-          threshold_json: string | null;
-          evidence_passage: string;
-          rule_status: string;
-        }>;
+      const snapshotsResult = await pool.query(
+        `SELECT id, source_rule_id, logical_rule_id, rule_version,
+                rule_name, rule_type, target_field, operator,
+                threshold_json, evidence_passage, rule_status
+         FROM decision_rule_snapshots
+         WHERE decision_id = $1
+         ORDER BY rule_name`,
+        [decision.id]
+      );
 
-      const results = db
-        .prepare(
-          `SELECT id, snapshot_id, result, observed_value_json, explanation
-           FROM rule_results
-           WHERE decision_id = ?`
-        )
-        .all(decision.id);
+      const snapshots = snapshotsResult.rows as Array<{
+        id: string;
+        source_rule_id: string;
+        logical_rule_id: string;
+        rule_version: number;
+        rule_name: string;
+        rule_type: string;
+        target_field: string;
+        operator: string;
+        threshold_json: string | null;
+        evidence_passage: string;
+        rule_status: string;
+      }>;
 
-      const review = db
-        .prepare(
-          `SELECT ra.id, ra.action, ra.reason, ra.reviewer_id,
-                  ra.created_at, u.username AS reviewer_username
-           FROM review_actions ra
-           JOIN users u ON u.id = ra.reviewer_id
-           WHERE ra.decision_id = ?`
-        )
-        .get(decision.id) as
+      const resultsResult = await pool.query(
+        `SELECT id, snapshot_id, result, observed_value_json, explanation
+         FROM rule_results
+         WHERE decision_id = $1`,
+        [decision.id]
+      );
+
+      const reviewResult = await pool.query(
+        `SELECT ra.id, ra.action, ra.reason, ra.reviewer_id,
+                ra.created_at, u.username AS reviewer_username
+         FROM review_actions ra
+         JOIN users u ON u.id = ra.reviewer_id
+         WHERE ra.decision_id = $1`,
+        [decision.id]
+      );
+
+      const review = reviewResult.rows[0] as
         | {
             id: string;
             action: "APPROVE" | "OVERRIDE";
@@ -406,7 +401,7 @@ decisionRouter.get(
               : JSON.parse(snapshot.threshold_json),
           threshold_json: undefined,
         })),
-        ruleResults: results,
+        ruleResults: resultsResult.rows,
         review: review
           ? {
               ...review,
